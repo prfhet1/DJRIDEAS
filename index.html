@@ -1107,7 +1107,177 @@ function downloadVideo() {
   const url = URL.createObjectURL(generatedVideoBlob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${currentAnalysis?.ticker || 'trade'}-video.webm`;
+  a.download = `${currentAnalysis?.ticker || 'trade'}-video.mp4`;
+  a.click();
+  URL.revokeObjectURL(url);
+  notify('MP4 downloaded ✓', 'success');
+}
+
+function downloadAudio() {
+  if (!generatedAudioBlob) { notify('No audio generated yet', 'error'); return; }
+  const url = URL.createObjectURL(generatedAudioBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentAnalysis?.ticker || 'trade'}-audio.mp3`;
+  a.click();
+  URL.revokeObjectURL(url);
+  notify('Audio downloaded ✓', 'success');
+}
+
+async function convertToMp4(webmBlob) {
+  // Load FFmpeg 0.11 dynamically — simpler API, works in browser
+  if (!window._ffmpegLoaded) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    window._ffmpegLoaded = true;
+  }
+
+  const { createFFmpeg, fetchFile } = FFmpeg;
+  const ffmpeg = createFFmpeg({
+    log: false,
+    corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+  });
+
+  notify('Loading converter... (first time takes ~30 seconds)', '');
+  await ffmpeg.load();
+
+  notify('Converting to MP4...', '');
+  const inputData = await fetchFile(webmBlob);
+  ffmpeg.FS('writeFile', 'input.webm', inputData);
+
+  await ffmpeg.run(
+    '-i', 'input.webm',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '23',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    '-movflags', '+faststart',
+    'output.mp4'
+  );
+
+  const mp4Data = ffmpeg.FS('readFile', 'output.mp4');
+  ffmpeg.FS('unlink', 'input.webm');
+  ffmpeg.FS('unlink', 'output.mp4');
+
+  return new Blob([mp4Data.buffer], { type: 'video/mp4' });
+}
+
+function downloadAudio() {
+  if (!generatedAudioBlob) { notify('No audio generated yet', 'error'); return; }
+  const url = URL.createObjectURL(generatedAudioBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentAnalysis?.ticker || 'trade'}-audio.mp3`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function rejectVideo() {
+  generatedVideoBlob = null;
+  document.getElementById('video-preview-section').style.display = 'none';
+  document.getElementById('publish-progress').style.display = 'none';
+  document.getElementById('btn-generate').disabled = false;
+  notify('Video rejected — edit your script and generate again', '');
+}
+
+// createVideo: sends image + audio to our Render server → gets real MP4 back
+async function createVideo(canvas, audioBlob, onProgress) {
+  const SERVER = window.location.hostname === 'localhost' || 
+                 window.location.hostname === 'djrideas-video-server.onrender.com'
+    ? '' 
+    : 'https://djrideas-video-server.onrender.com';
+
+  document.getElementById('publish-status').textContent = 'Preparing files...';
+  onProgress(0.1);
+
+  // Convert canvas to JPEG blob
+  const imageBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+  onProgress(0.15);
+
+  // Build multipart form
+  const formData = new FormData();
+  formData.append('image', imageBlob, 'chart.jpg');
+  formData.append('audio', audioBlob, 'voice.mp3');
+
+  document.getElementById('publish-status').textContent = 'Creating MP4... this takes 1-2 minutes';
+  onProgress(0.2);
+
+  // Fake progress
+  let fake = 0.2;
+  const fakeInt = setInterval(() => {
+    fake = Math.min(fake + 0.01, 0.92);
+    onProgress(fake);
+  }, 3000);
+
+  try {
+    const res = await fetch(SERVER + '/create-video', {
+      method: 'POST',
+      body: formData
+    });
+
+    clearInterval(fakeInt);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Server error ' + res.status);
+    }
+
+    onProgress(0.97);
+    document.getElementById('publish-status').textContent = 'Downloading MP4...';
+    const mp4Blob = await res.blob();
+    console.log('MP4 received, size:', mp4Blob.size);
+    if (mp4Blob.size === 0) throw new Error('Empty video returned');
+    onProgress(1.0);
+    return mp4Blob;
+
+  } catch(e) {
+    clearInterval(fakeInt);
+    throw e;
+  }
+}
+
+
+async function approveAndUpload() {
+  const youtubeKey = getKey('youtube');
+  if (!youtubeKey) { notify('Add YouTube API key in Settings first', 'error'); return; }
+  if (!generatedVideoBlob) { notify('Generate a video first', 'error'); return; }
+
+  const status = document.getElementById('publish-status');
+  const fill = document.getElementById('progress-fill');
+  document.getElementById('btn-approve-upload').disabled = true;
+  status.textContent = 'Uploading to YouTube...';
+  fill.style.width = '10%';
+
+  try {
+    const ticker = currentAnalysis.ticker || 'Trade';
+    const sectorLabel = currentSector === 'idea' ? 'Setup idea' : currentSector === 'open' ? 'Trade open' : currentSector === 'close' ? 'Trade close' : 'Educational update';
+    const title = `${ticker} — ${sectorLabel} | Educational swing trade analysis`;
+    const description = `${currentAnalysis.youtube}\n\n⚠️ DISCLAIMER: This video is for educational and informational purposes only. It does not constitute financial advice, investment recommendations, or solicitation to buy or sell any securities. Always conduct your own research and consult with a licensed financial advisor before making any investment decisions. Past performance is not indicative of future results.`;
+
+    await uploadToYoutube(youtubeKey, generatedVideoBlob, title, description);
+    fill.style.width = '100%';
+    status.textContent = 'Published to YouTube ✓';
+    notify('Video uploaded to YouTube ✓', 'success');
+    markPublished('youtube');
+  } catch(e) {
+    status.textContent = 'Upload error: ' + e.message;
+    notify('Upload error: ' + e.message, 'error');
+    document.getElementById('btn-approve-upload').disabled = false;
+  }
+}
+
+function downloadVideo() {
+  if (!generatedVideoBlob) { notify('No video generated yet', 'error'); return; }
+  const url = URL.createObjectURL(generatedVideoBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${currentAnalysis?.ticker || 'trade'}-video.mp4`;
   a.click();
   URL.revokeObjectURL(url);
   notify('MP4 downloaded ✓', 'success');
@@ -1362,7 +1532,7 @@ function downloadVideo() {
   const url = URL.createObjectURL(generatedVideoBlob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${currentAnalysis?.ticker || 'trade'}-video.webm`;
+  a.download = `${currentAnalysis?.ticker || 'trade'}-video.mp4`;
   a.click();
   URL.revokeObjectURL(url);
   notify('MP4 downloaded ✓', 'success');
