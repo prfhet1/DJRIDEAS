@@ -1187,41 +1187,66 @@ function rejectVideo() {
 
 // createVideo: sends image + audio to Render.com FFmpeg server → returns real MP4
 async function createVideo(canvas, audioBlob, onProgress) {
-  const SERVER_URL = 'https://djrideas-video-server.onrender.com/create-video';
+  const BASE_URL = 'https://djrideas-video-server.onrender.com';
+  const SERVER_URL = BASE_URL + '/create-video';
 
+  // Step 1: Wake up the server first
   onProgress(0.05);
+  document.getElementById('publish-status').textContent = 'Waking up video server...';
+  try {
+    await fetch(BASE_URL, { signal: AbortSignal.timeout(10000) });
+  } catch(e) { /* ignore — just a ping */ }
+
+  onProgress(0.15);
+  document.getElementById('publish-status').textContent = 'Preparing video...';
 
   // Convert canvas to image blob (JPG)
-  const imageBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.95));
+  const imageBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
 
-  onProgress(0.1);
+  onProgress(0.2);
 
   // Build form data
   const formData = new FormData();
   formData.append('image', imageBlob, 'chart.jpg');
   formData.append('audio', audioBlob, 'voice.mp3');
 
-  onProgress(0.15);
+  document.getElementById('publish-status').textContent = 'Creating MP4 on server... (please wait)';
+  onProgress(0.25);
 
-  // Send to server — this may take 30-60 seconds on first call (server wakes up)
-  const response = await fetch(SERVER_URL, {
-    method: 'POST',
-    body: formData
-  });
+  // Fake progress while waiting
+  let fakeProgress = 0.25;
+  const fakeInterval = setInterval(() => {
+    fakeProgress = Math.min(fakeProgress + 0.02, 0.88);
+    onProgress(fakeProgress);
+  }, 2000);
 
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({}));
-    throw new Error('Video server error: ' + (err.error || response.status));
+  try {
+    const response = await fetch(SERVER_URL, {
+      method: 'POST',
+      body: formData,
+      signal: AbortSignal.timeout(300000) // 5 min timeout
+    });
+
+    clearInterval(fakeInterval);
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error('Video server error: ' + (err.error || response.status));
+    }
+
+    onProgress(0.95);
+    document.getElementById('publish-status').textContent = 'Downloading MP4...';
+
+    const mp4Blob = await response.blob();
+    if (mp4Blob.size === 0) throw new Error('Server returned empty video');
+
+    onProgress(1.0);
+    return mp4Blob;
+
+  } catch(e) {
+    clearInterval(fakeInterval);
+    throw e;
   }
-
-  onProgress(0.9);
-
-  const mp4Blob = await response.blob();
-
-  if (mp4Blob.size === 0) throw new Error('Server returned empty video');
-
-  onProgress(1.0);
-  return mp4Blob;
 }
 
 function getAudioDuration(blob) {
