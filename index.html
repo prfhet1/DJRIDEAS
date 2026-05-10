@@ -356,10 +356,11 @@
               </div>
             </div>
             <div style="display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; align-items:center;">
-              <button class="btn btn-green" onclick="downloadVideo()">⬇️ Download MP4</button>
+              <button class="btn btn-green" onclick="approveAndUpload()" id="btn-approve-upload">✅ Approve & upload to YouTube</button>
+              <button class="btn btn-ghost btn-sm" onclick="downloadVideo()">⬇️ Download video</button>
               <button class="btn btn-ghost btn-sm" onclick="rejectVideo()">✕ Reject & redo</button>
             </div>
-            <p style="font-size:11px; color:var(--text3); margin-top:10px; line-height:1.6;">💡 First time may take 60 seconds to wake the server. Download the MP4 or approve to upload to YouTube.</p>
+            <p style="font-size:11px; color:var(--text3); margin-top:10px; line-height:1.6;">💡 Video is in webm format — plays in Chrome. YouTube accepts webm directly.</p>
           </div>
         </div>
 
@@ -1106,7 +1107,7 @@ function downloadVideo() {
   const url = URL.createObjectURL(generatedVideoBlob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${currentAnalysis?.ticker || 'trade'}-video.mp4`;
+  a.download = `${currentAnalysis?.ticker || 'trade'}-video.webm`;
   a.click();
   URL.revokeObjectURL(url);
   notify('MP4 downloaded ✓', 'success');
@@ -1193,9 +1194,10 @@ async function createVideo(canvas, audioBlob, onProgress) {
       document.getElementById('publish-status').textContent = 'Decoding audio...';
       onProgress(0.05);
 
-      // Decode audio to get exact duration and buffer
+      // Decode audio to get duration
       const arrayBuf1 = await audioBlob.arrayBuffer();
       const tempCtx = new AudioContext();
+      await tempCtx.resume();
       const decoded = await tempCtx.decodeAudioData(arrayBuf1);
       const duration = decoded.duration;
       await tempCtx.close();
@@ -1203,8 +1205,10 @@ async function createVideo(canvas, audioBlob, onProgress) {
       onProgress(0.1);
       document.getElementById('publish-status').textContent = 'Setting up recording...';
 
-      // Fresh AudioContext for recording
+      // Fresh AudioContext — must resume to activate
       const audioCtx = new AudioContext();
+      await audioCtx.resume();
+
       const streamDest = audioCtx.createMediaStreamDestination();
 
       // Load audio into buffer source
@@ -1220,18 +1224,22 @@ async function createVideo(canvas, audioBlob, onProgress) {
       const audioTrack = streamDest.stream.getAudioTracks()[0];
       if (audioTrack) canvasStream.addTrack(audioTrack);
 
-      // Set up recorder
+      // Pick best mime type
       const mimeType = ['video/webm;codecs=vp8,opus','video/webm;codecs=vp9,opus','video/webm']
         .find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
       const recorder = new MediaRecorder(canvasStream, { mimeType, videoBitsPerSecond: 4000000 });
       const chunks = [];
-      recorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+      recorder.ondataavailable = e => { 
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
       recorder.onstop = () => {
         audioCtx.close();
-        resolve(new Blob(chunks, { type: mimeType }));
+        const blob = new Blob(chunks, { type: mimeType });
+        console.log('Recording done, blob size:', blob.size, 'chunks:', chunks.length);
+        resolve(blob);
       };
-      recorder.onerror = () => reject(new Error('Recording error'));
+      recorder.onerror = e => reject(new Error('Recording error: ' + e));
 
       // Progress tracking
       let elapsed = 0;
@@ -1242,13 +1250,19 @@ async function createVideo(canvas, audioBlob, onProgress) {
           `Recording... ${Math.round(elapsed)}s / ${Math.round(duration)}s`;
       }, 500);
 
-      // Start recorder FIRST then audio
-      recorder.start(200);
-      await new Promise(r => setTimeout(r, 300));
+      // Start recorder, wait a moment, then start audio
+      recorder.start(100);
+      await new Promise(r => setTimeout(r, 200));
+      
+      // Resume context again right before playing (Chrome may suspend it)
+      await audioCtx.resume();
       source.start(0);
+
+      console.log('Recording started, audioCtx state:', audioCtx.state);
 
       // Stop when audio ends
       source.onended = () => {
+        console.log('Audio ended, stopping recorder');
         clearInterval(interval);
         setTimeout(() => {
           if (recorder.state === 'recording') recorder.stop();
@@ -1257,6 +1271,7 @@ async function createVideo(canvas, audioBlob, onProgress) {
 
       // Hard timeout fallback
       setTimeout(() => {
+        console.log('Timeout fallback firing');
         clearInterval(interval);
         if (recorder.state === 'recording') recorder.stop();
       }, (duration * 1000) + 5000);
