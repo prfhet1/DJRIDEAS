@@ -1280,8 +1280,15 @@ async function createVideo(canvas, audioBlob, onProgress) {
       }, 500);
 
       // START: recorder first, then play audio
-      recorder.start(500); // collect data every 500ms
+      recorder.start(); // no timeslice — collect all at once at stop
       console.log('Recorder state after start:', recorder.state);
+
+      // Request data periodically manually
+      const dataInterval = setInterval(() => {
+        if (recorder.state === 'recording') {
+          recorder.requestData();
+        }
+      }, 1000);
 
       // Small delay then play
       setTimeout(async () => {
@@ -1297,6 +1304,7 @@ async function createVideo(canvas, audioBlob, onProgress) {
       audio.onended = () => {
         console.log('Audio ended');
         clearInterval(interval);
+        clearInterval(dataInterval);
         setTimeout(() => {
           if (recorder.state !== 'inactive') recorder.stop();
         }, 800);
@@ -1305,6 +1313,7 @@ async function createVideo(canvas, audioBlob, onProgress) {
       // Hard fallback
       setTimeout(() => {
         clearInterval(interval);
+        clearInterval(dataInterval);
         if (recorder.state !== 'inactive') {
           console.log('Fallback stop triggered');
           recorder.stop();
